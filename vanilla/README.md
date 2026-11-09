@@ -107,10 +107,10 @@ Destroy the global instance: closes the realtime stream, stops all timers and re
 
 ## Real-time Updates & Caching
 
-Since 1.3.0 the client uses `refreshStrategy: 'realtime'` by default: it keeps a live change stream (Server-Sent Events) open and only refetches when flags changed, using conditional requests (`ETag` → `304 Not Modified`). If streaming is unavailable (stream limit, older Togglely server, proxies) it falls back to ETag polling every `refreshIntervalMs` (default 30 s). Changed values reach your UI automatically through the `update` event.
+Since 1.3.0 the client uses `refreshStrategy: 'realtime'` by default **in browsers** (Node.js, SSR and React Native keep `'manual'`): it keeps a live change stream (Server-Sent Events) open and only refetches when flags changed, using conditional requests (`ETag` → `304 Not Modified`). If streaming is unavailable (stream limit, older Togglely server, proxies) it falls back to ETag polling every `refreshIntervalMs` (default 30 s). Changed values reach your UI automatically through the `update` event.
 
 - **Lifecycle:** `togglelyInit()` re-applies your DOM bindings on every `update`. Call `destroyTogglely()` (or `client.destroy()`) when the client is no longer needed.
-- **Node.js:** timers are `unref()`'d, but an open stream keeps the process alive — call `client.destroy()` on shutdown, or use `refreshStrategy: 'manual'` for one-off scripts.
+- **Node.js:** the default stays `'manual'` (scripts exit as before). An explicit `refreshStrategy: 'realtime'` is meant for long-running servers: the open stream keeps the process alive until `destroyTogglely()` / `client.destroy()`. Without `window` the instance of `initTogglely()` is kept at module level (`getGlobalTogglely()`, `destroyTogglely()` work in Node too).
 - **Opt out:** pass `refreshStrategy: 'manual'` to restore the pre-1.3.0 behaviour (fetch only on `refresh()`).
 - **Hidden tabs:** the stream is closed after 5 minutes in a hidden tab and resumed when visible (`pauseWhenHidden: false` disables this).
 - **Debugging:** `client.on('stream-connected' | 'stream-disconnected', ...)`.

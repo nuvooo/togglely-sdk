@@ -50,7 +50,7 @@ initTogglely({
   baseUrl: 'https://togglely.io',
   tenantId: 'brand-a',              // optional
   offlineJsonPath: '/toggles.json', // optional
-  refreshStrategy: 'realtime',      // optional (default; 'manual' to opt out)
+  refreshStrategy: 'realtime',      // optional (browser default; 'manual' to opt out)
 });
 ```
 
@@ -74,10 +74,10 @@ destroyTogglely();
 
 ## Real-time Updates & Caching
 
-Since 1.3.0 the client uses `refreshStrategy: 'realtime'` by default: it keeps a live change stream (Server-Sent Events) open and only refetches when flags changed, using conditional requests (`ETag` → `304 Not Modified`). If streaming is unavailable (stream limit, older Togglely server, proxies) it falls back to ETag polling every `refreshIntervalMs` (default 30 s). Changed values reach your UI automatically through the `update` event.
+Since 1.3.0 the client uses `refreshStrategy: 'realtime'` by default **in browsers** (Node.js, SSR and React Native keep `'manual'`): it keeps a live change stream (Server-Sent Events) open and only refetches when flags changed, using conditional requests (`ETag` → `304 Not Modified`). If streaming is unavailable (stream limit, older Togglely server, proxies) it falls back to ETag polling every `refreshIntervalMs` (default 30 s). Changed values reach your UI automatically through the `update` event.
 
 - **Lifecycle:** call `destroyTogglely()` to close the stream; `initTogglely()` destroys a previous instance automatically.
-- **SSR (SvelteKit):** on the server `initTogglely()` defaults to `refreshStrategy: 'manual'`, so no stream is opened during rendering.
+- **SSR (SvelteKit):** on the server the default strategy is `'manual'`, so no stream is opened during rendering.
 - **Opt out:** pass `refreshStrategy: 'manual'` to restore the pre-1.3.0 behaviour (fetch only on `refresh()`).
 - **Hidden tabs:** the stream is closed after 5 minutes in a hidden tab and resumed when visible (`pauseWhenHidden: false` disables this).
 - **Debugging:** `client.on('stream-connected' | 'stream-disconnected', ...)`.

@@ -201,7 +201,14 @@ client.setContext({ userId: '123', country: 'DE' });
 
 ### Real-time Updates & Caching
 
-Since 1.3.0 all SDKs default to `refreshStrategy: 'realtime'`: flags are kept in memory, a live change stream (Server-Sent Events) tells the client when something changed, and refetches are conditional (`ETag` / `304 Not Modified`). When streaming is not possible the client falls back to ETag polling automatically. Set `refreshStrategy: 'manual'` to opt out. Details: [Core SDK — Real-time Updates & Caching](./core/README.md#real-time-updates--caching).
+Since 1.3.0 the SDKs use `refreshStrategy: 'realtime'` by default **in browsers**: flags are kept in memory, a live change stream (Server-Sent Events) tells the client when something changed, and refetches are conditional (`ETag` / `304 Not Modified`). When streaming is not possible the client falls back to ETag polling automatically. Set `refreshStrategy: 'manual'` to opt out.
+
+| Platform | Default `refreshStrategy` |
+|----------|---------------------------|
+| Browsers with streaming `fetch` (`ReadableStream` + `TextDecoder`) | `'realtime'` |
+| Node.js, SSR, React Native, Web Workers (no `document`) | `'manual'` (as in 1.2.x) |
+
+`detectDefaultRefreshStrategy()` returns the default for the current platform. An explicit `refreshStrategy` always wins. Details: [Core SDK — Real-time Updates & Caching](./core/README.md#real-time-updates--caching).
 
 **Server-side reactions:** to run backend logic when a flag changes (cache invalidation, deployments, audit trails), configure a **webhook** for the project in the Togglely dashboard (*Project settings → Webhooks*) instead of keeping a stream open in every server process.
 
@@ -211,10 +218,14 @@ Four built-in strategies control how toggles stay up to date:
 
 | Strategy | Description | Best for |
 |----------|-------------|----------|
-| `realtime` (default) | Live change stream; refetch only on changes, ETag polling as fallback | Most apps, long-running servers |
-| `manual` | Cached reads are side-effect free; call `refresh()` explicitly | Controlled refresh, scripts |
+| `realtime` (browser default) | Live change stream; refetch only on changes, ETag polling as fallback | Browser apps, long-running servers |
+| `manual` (default in Node.js, SSR, React Native) | Cached reads are side-effect free; call `refresh()` explicitly | Controlled refresh, scripts |
 | `interval` | Background refresh on a fixed interval | Dashboards, internal tools |
 | `stale-while-revalidate` | Cached reads may trigger a throttled background refresh | Interactive apps |
+
+## Changelog
+
+See [CHANGELOG.md](./CHANGELOG.md).
 
 ## Documentation
 

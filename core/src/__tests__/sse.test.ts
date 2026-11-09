@@ -1,7 +1,7 @@
 /**
  * @jest-environment node
  */
-import { createSseParser, SseEvent } from '../sse'
+import { createSseParser, SseEvent, SseLimitError } from '../sse'
 
 function collect() {
   const events: SseEvent[] = []
@@ -95,6 +95,42 @@ describe('createSseParser', () => {
     const { events, push } = collect()
     push('﻿data:  two spaces\n\n')
     expect(events[0].data).toBe(' two spaces')
+  })
+
+  it('resets the last event id on an empty id field', () => {
+    const { events, push } = collect()
+    push('id: 5\ndata: a\n\nid\ndata: b\n\nid: 6\ndata: c\n\nid:\ndata: d\n\n')
+    expect(events.map((event) => event.id)).toEqual(['5', '', '6', ''])
+  })
+
+  it('starts with the last event id of a previous connection', () => {
+    const events: SseEvent[] = []
+    const push = createSseParser(
+      { onEvent: (event) => events.push(event) },
+      '41'
+    )
+    push('data: a\n\nid: \ndata: b\n\n')
+    expect(events.map((event) => event.id)).toEqual(['41', ''])
+  })
+
+  it('throws SseLimitError for oversized lines and events', () => {
+    const line = createSseParser({ onEvent: () => {} }, '', 10)
+    line('data: 12')
+    expect(() => line('345')).toThrow(SseLimitError)
+
+    const event = createSseParser({ onEvent: () => {} }, '', 10)
+    event('data: 12345\n')
+    expect(() => event('data: 67890\n')).toThrow(SseLimitError)
+  })
+
+  it('scans long lines split into many chunks in linear time', () => {
+    const { events, push } = collect()
+    const started = Date.now()
+    push('data: ')
+    for (let i = 0; i < 20000; i++) push('x'.repeat(40))
+    push('\n\n')
+    expect(events[0].data.length).toBe(20000 * 40)
+    expect(Date.now() - started).toBeLessThan(2000)
   })
 
   it('does not dispatch an incomplete trailing event', () => {

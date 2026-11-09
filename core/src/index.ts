@@ -11,7 +11,7 @@
  *   refreshes; falls back to ETag polling when streaming is unavailable
  */
 
-import { createSseParser, SseEvent } from './sse'
+import { createSseParser, SseEvent, SseLimitError } from './sse'
 
 // --- Typed Error Classes ---
 
@@ -161,6 +161,38 @@ const STREAM_MAX_FAILURES = 5
 const STREAM_RETRY_MS = 5 * 60000
 /** Hidden browser tab: close the stream after this delay */
 const HIDDEN_PAUSE_MS = 5 * 60000
+/** Stream request: response headers must arrive within this time */
+const STREAM_CONNECT_TIMEOUT_MS = 15000
+
+/** fetch + ReadableStream + TextDecoder are available (not React Native) */
+function canStream(): boolean {
+  return (
+    typeof fetch === 'function' &&
+    typeof TextDecoder !== 'undefined' &&
+    typeof ReadableStream !== 'undefined' &&
+    typeof AbortController !== 'undefined' &&
+    !(typeof navigator !== 'undefined' && navigator?.product === 'ReactNative')
+  )
+}
+
+/**
+ * Default refresh strategy for the current platform: 'realtime' in browsers
+ * with streaming fetch, 'manual' everywhere else (Node, SSR, React Native,
+ * workers). Explicit `refreshStrategy` options always win.
+ */
+export function detectDefaultRefreshStrategy(): RefreshStrategy {
+  return typeof window !== 'undefined' &&
+    typeof document !== 'undefined' &&
+    canStream()
+    ? 'realtime'
+    : 'manual'
+}
+
+/** Seconds of a Retry-After header in ms (HTTP-date is not supported) */
+function retryAfterMs(response: Response): number {
+  const value = Number(response.headers?.get?.('Retry-After'))
+  return Number.isFinite(value) && value > 0 ? value * 1000 : 0
+}
 
 const noop = () => {}
 
@@ -236,6 +268,8 @@ export class TogglelyClient {
   /** ETag of the response the cached toggles came from */
   private etag: string | null = null
   private requests: Set<AbortController> = new Set()
+  /** Server data has been applied: late offline data must not override it */
+  private serverDataApplied = false
 
   // Realtime (change stream + polling fallback)
   private realtimeStarted = false
@@ -276,7 +310,7 @@ export class TogglelyClient {
       envPrefix: 'TOGGLELY_',
       autoFetch: true,
       offlineJsonPath: undefined,
-      refreshStrategy: 'realtime',
+      refreshStrategy: detectDefaultRefreshStrategy(),
       refreshIntervalMs: 30000,
       minRefreshIntervalMs: 5000,
       streamPath: '/sdk/stream',
@@ -419,6 +453,10 @@ export class TogglelyClient {
       return cachedValue
     }
 
+    if (this.destroyed) {
+      return null
+    }
+
     const existingPromise = this.pendingPromises.get(key)
     if (existingPromise) {
       return new Promise((resolve, reject) => {
@@ -498,8 +536,10 @@ export class TogglelyClient {
     } catch (error) {
       for (const key of keys) {
         const keyPromises = promises.get(key) || []
-        for (const { reject } of keyPromises) {
-          reject(error)
+        for (const { resolve, reject } of keyPromises) {
+          // destroy() during the request: settle like a missing flag
+          if (this.destroyed) resolve(null)
+          else reject(error)
         }
       }
     }
@@ -570,6 +610,7 @@ export class TogglelyClient {
         const response = await fetch(path)
         if (response.ok) {
           const data = await response.json()
+          if (this.serverDataApplied || this.destroyed) return
           for (const [key, value] of Object.entries(data)) {
             this.toggles.set(key, this.parseOfflineValue(value))
           }
@@ -654,6 +695,20 @@ export class TogglelyClient {
 
   private async performRefresh(): Promise<void> {
     try {
+      await this.fetchToggles()
+    } catch (error) {
+      // Invalid key / origin: the stream would fail the same way
+      const status = (error as TogglelyNetworkError).statusCode
+      if (!this.destroyed && status !== 401 && status !== 403) {
+        this.startRealtimeSafely()
+      }
+      throw error
+    }
+    this.startRealtimeSafely()
+  }
+
+  private async fetchToggles(): Promise<void> {
+    try {
       const params = new URLSearchParams()
       if (this.context.brandKey)
         params.set('brandKey', String(this.context.brandKey))
@@ -694,6 +749,7 @@ export class TogglelyClient {
         changed = this.replaceTogglesIfChanged(data)
         this.etag = response.headers?.get?.('ETag') || null
       }
+      this.serverDataApplied = true
 
       this.state.lastFetch = new Date()
       this.state.lastError = null
@@ -712,8 +768,6 @@ export class TogglelyClient {
       if (changed) {
         this.emit('update')
       }
-
-      this.startRealtime()
     } catch (error) {
       if (this.destroyed) throw error
       this.state.lastError = error as Error
@@ -729,12 +783,6 @@ export class TogglelyClient {
 
       this.emit('error')
       console.error('[Togglely] Failed to refresh toggles:', error)
-
-      // Invalid key / origin: the stream would fail the same way
-      const status = (error as TogglelyNetworkError).statusCode
-      if (status !== 401 && status !== 403) {
-        this.startRealtime()
-      }
       throw error
     }
   }
@@ -753,6 +801,17 @@ export class TogglelyClient {
 
   // ==================== Realtime ====================
 
+  /** Errors while starting the stream never fail a refresh. */
+  private startRealtimeSafely(): void {
+    try {
+      this.startRealtime()
+    } catch (error) {
+      this.state.lastError = error as Error
+      this.emit('error')
+      console.error('[Togglely] Failed to start realtime updates:', error)
+    }
+  }
+
   /** Starts the change stream once (realtime strategy only). */
   private startRealtime(): void {
     if (
@@ -765,12 +824,8 @@ export class TogglelyClient {
     this.realtimeStarted = true
     this.watchVisibility()
     if (this.paused) return
-    if (
-      typeof TextDecoder === 'undefined' ||
-      typeof AbortController === 'undefined'
-    ) {
-      this.streamUnsupported = true
-    }
+    // No streaming fetch (React Native, old browsers): poll directly
+    if (!canStream()) this.streamUnsupported = true
     if (this.streamUnsupported) this.startPolling(false)
     else this.connectStream()
   }
@@ -791,13 +846,23 @@ export class TogglelyClient {
     const lastId = this.lastEventId || versionFromEtag(this.etag)
     if (lastId) headers['Last-Event-ID'] = lastId
 
-    this.armWatchdog(gen)
+    // Response headers must arrive in time (XHR-based fetch polyfills
+    // may never settle)
+    this.armWatchdog(gen, STREAM_CONNECT_TIMEOUT_MS)
     fetch(
       `${this.config.baseUrl}${this.config.streamPath}/${encodeURIComponent(this.config.project)}/${encodeURIComponent(this.config.environment)}`,
       { headers, signal: controller.signal }
     )
       .then((response) => this.readStream(response, gen))
-      .catch(() => this.onStreamFailure(gen))
+      .catch((error) => {
+        if (error instanceof SseLimitError && gen === this.streamGen) {
+          // Oversized event: give up on the stream for a while
+          this.startPolling(true)
+          this.queueRefresh()
+        } else {
+          this.onStreamFailure(gen)
+        }
+      })
   }
 
   private async readStream(response: Response, gen: number): Promise<void> {
@@ -823,8 +888,24 @@ export class TogglelyClient {
       return
     }
     if (status === 429) {
-      // Stream limit reached (fallback: 'etag-polling')
-      this.startPolling(true)
+      const retryAfter = retryAfterMs(response)
+      let code: unknown
+      try {
+        code = (await response.json())?.code
+      } catch {
+        // no JSON body
+      }
+      if (gen !== this.streamGen) return
+      if (code === 'STREAM_LIMIT') {
+        // Stream limit reached (fallback: 'etag-polling')
+        this.startPolling(
+          true,
+          retryAfter ? Math.min(retryAfter, STREAM_RETRY_MS) : STREAM_RETRY_MS
+        )
+      } else {
+        // General rate limit: reconnect later, not before Retry-After
+        this.onStreamFailure(gen, retryAfter)
+      }
       return
     }
 
@@ -846,12 +927,15 @@ export class TogglelyClient {
 
     const reader = body.getReader()
     const decoder = new TextDecoder()
-    const parse = createSseParser({
-      onEvent: (event) => this.onStreamEvent(event),
-      onRetry: (ms) => {
-        this.serverRetryMs = ms
+    const parse = createSseParser(
+      {
+        onEvent: (event) => this.onStreamEvent(event),
+        onRetry: (ms) => {
+          this.serverRetryMs = ms
+        },
       },
-    })
+      this.lastEventId
+    )
 
     this.armWatchdog(gen)
     for (;;) {
@@ -873,7 +957,8 @@ export class TogglelyClient {
   }
 
   private onStreamEvent(event: SseEvent): void {
-    if (event.id) this.lastEventId = event.id
+    // An empty id field resets the last event ID (WHATWG)
+    this.lastEventId = event.id
     if (event.type === 'ready') {
       this.streamFailures = 0
       // Recover after an outage even when no flag changed meanwhile
@@ -883,7 +968,7 @@ export class TogglelyClient {
     }
   }
 
-  private onStreamFailure(gen: number): void {
+  private onStreamFailure(gen: number, minDelayMs = 0): void {
     if (gen !== this.streamGen || this.destroyed) return
     this.closeStream()
     this.streamFailures++
@@ -896,7 +981,7 @@ export class TogglelyClient {
     this.reconnectTimer = later(() => {
       this.reconnectTimer = null
       this.connectStream()
-    }, this.reconnectDelay())
+    }, Math.max(minDelayMs, this.reconnectDelay()))
   }
 
   /** Exponential backoff (1 s ... 30 s, at least the server's retry) + jitter */
@@ -910,12 +995,12 @@ export class TogglelyClient {
     return base + Math.floor(Math.random() * base * 0.3)
   }
 
-  private armWatchdog(gen: number): void {
+  private armWatchdog(gen: number, ms = STREAM_WATCHDOG_MS): void {
     if (this.watchdogTimer) clearTimeout(this.watchdogTimer)
     this.watchdogTimer = later(() => {
       this.watchdogTimer = null
       this.onStreamFailure(gen)
-    }, STREAM_WATCHDOG_MS)
+    }, ms)
   }
 
   /** Aborts the current stream (if any) and its timers. */
@@ -935,8 +1020,11 @@ export class TogglelyClient {
     }
   }
 
-  /** ETag polling; optionally retries the stream after 5 minutes. */
-  private startPolling(retryStream: boolean): void {
+  /** ETag polling; optionally retries the stream (default after 5 min). */
+  private startPolling(
+    retryStream: boolean,
+    retryAfterMs = STREAM_RETRY_MS
+  ): void {
     this.closeStream()
     if (!this.pollHandle) {
       this.pollHandle = setInterval(
@@ -950,7 +1038,7 @@ export class TogglelyClient {
         this.streamRetryTimer = null
         this.streamFailures = 0
         this.connectStream()
-      }, STREAM_RETRY_MS)
+      }, retryAfterMs)
     }
   }
 
@@ -1036,6 +1124,12 @@ export class TogglelyClient {
     this.refreshTimeout = null
     this.intervalHandle = null
     this.hiddenTimer = null
+    // Settle reads waiting for the next batch (like a missing flag)
+    this.pendingPromises.forEach((waiting) =>
+      waiting.forEach(({ resolve }) => resolve(null))
+    )
+    this.pendingPromises.clear()
+    this.pendingKeys.clear()
   }
 
   private fetchWithTimeout(

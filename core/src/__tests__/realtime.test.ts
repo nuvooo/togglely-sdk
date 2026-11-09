@@ -1,7 +1,12 @@
 /**
  * @jest-environment node
  */
-import { TogglelyClient, TogglelyConfig, ToggleValue } from '../index'
+import {
+  detectDefaultRefreshStrategy,
+  TogglelyClient,
+  TogglelyConfig,
+  ToggleValue,
+} from '../index'
 
 const encoder = new TextEncoder()
 
@@ -93,7 +98,7 @@ function harness() {
   const flagCalls: Call[] = []
   const streamCalls: Call[] = []
   const streams: FakeStream[] = []
-  let flagsResponder: () => Response | Promise<Response> = () =>
+  let flagsResponder: (init: Init) => Response | Promise<Response> = () =>
     flagsResponse({ a: flag(true) }, 'W/"1-abc"')
   let streamResponder: (init: Init) => Response = (init) => {
     const stream = sseStream(init.signal)
@@ -109,7 +114,7 @@ function harness() {
         return streamResponder(init)
       }
       flagCalls.push(call)
-      return flagsResponder()
+      return flagsResponder(init)
     }
   )
 
@@ -118,7 +123,7 @@ function harness() {
     streamCalls,
     streams,
     lastStream: () => streams[streams.length - 1],
-    onFlags(responder: () => Response | Promise<Response>) {
+    onFlags(responder: (init: Init) => Response | Promise<Response>) {
       flagsResponder = responder
     },
     onStream(responder: (init: Init) => Response) {
@@ -133,7 +138,25 @@ const baseConfig: TogglelyConfig = {
   environment: 'production',
   baseUrl: 'https://flags.example.com',
   offlineFallback: false,
+  refreshStrategy: 'realtime',
 }
+
+/** Browser-like globals for the default strategy detection */
+function fakeBrowser(product = 'Gecko') {
+  ;(global as any).window = {}
+  ;(global as any).document = {
+    visibilityState: 'visible',
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }
+  Object.defineProperty(global, 'navigator', {
+    value: { product },
+    configurable: true,
+    writable: true,
+  })
+}
+
+const realNavigator = (global as any).navigator
 
 describe('TogglelyClient realtime', () => {
   let client: TogglelyClient | undefined
@@ -154,6 +177,12 @@ describe('TogglelyClient realtime', () => {
     jest.useRealTimers()
     jest.restoreAllMocks()
     delete (global as any).document
+    delete (global as any).window
+    Object.defineProperty(global, 'navigator', {
+      value: realNavigator,
+      configurable: true,
+      writable: true,
+    })
   })
 
   async function start(config: Partial<TogglelyConfig> = {}) {
@@ -162,7 +191,74 @@ describe('TogglelyClient realtime', () => {
     return client
   }
 
-  it('uses realtime as default and opens the stream after the initial fetch', async () => {
+  describe('default strategy', () => {
+    const { refreshStrategy: _ignored, ...noStrategy } = baseConfig
+
+    it('is manual in Node (process can exit, no stream)', async () => {
+      expect(detectDefaultRefreshStrategy()).toBe('manual')
+      const h = harness()
+      client = new TogglelyClient(noStrategy)
+      await flush()
+      await advance(10 * 60000)
+      expect(h.flagCalls).toHaveLength(1)
+      expect(h.streamCalls).toHaveLength(0)
+      expect(jest.getTimerCount()).toBe(0)
+    })
+
+    it('is realtime in browsers with streaming fetch', async () => {
+      fakeBrowser()
+      expect(detectDefaultRefreshStrategy()).toBe('realtime')
+      const h = harness()
+      client = new TogglelyClient(noStrategy)
+      await flush()
+      expect(h.streamCalls).toHaveLength(1)
+    })
+
+    it('is manual in React Native', () => {
+      fakeBrowser('ReactNative')
+      expect(detectDefaultRefreshStrategy()).toBe('manual')
+    })
+
+    it('is manual without ReadableStream', () => {
+      fakeBrowser()
+      const original = (global as any).ReadableStream
+      delete (global as any).ReadableStream
+      try {
+        expect(detectDefaultRefreshStrategy()).toBe('manual')
+      } finally {
+        ;(global as any).ReadableStream = original
+      }
+    })
+  })
+
+  it('explicit realtime in React Native polls without stream attempts', async () => {
+    fakeBrowser('ReactNative')
+    const h = harness()
+    await start()
+    expect(h.streamCalls).toHaveLength(0)
+    await advance(30000)
+    expect(h.flagCalls).toHaveLength(2)
+    await advance(60 * 60000)
+    expect(h.streamCalls).toHaveLength(0)
+  })
+
+  it('aborts a stream request whose headers do not arrive within 15 s', async () => {
+    const h = harness()
+    const signals: AbortSignal[] = []
+    h.onStream((init) => {
+      signals.push(init.signal!)
+      return new Promise<Response>(() => {}) as any
+    })
+    await start()
+    await advance(14999)
+    expect(signals[0].aborted).toBe(false)
+    await advance(1)
+    expect(signals[0].aborted).toBe(true)
+    await advance(1000)
+    expect(h.streamCalls).toHaveLength(2)
+  })
+
+  it('uses realtime when configured and opens the stream after the initial fetch', async () => {
     const h = harness()
     const connected = jest.fn()
     client = new TogglelyClient(baseConfig)
@@ -427,6 +523,137 @@ describe('TogglelyClient realtime', () => {
 
     await advance(5 * 60000 - 20000)
     expect(h.streamCalls).toHaveLength(2)
+  })
+
+  it('429 STREAM_LIMIT respects Retry-After for the next stream attempt', async () => {
+    const h = harness()
+    h.onStream(
+      () =>
+        new Response(JSON.stringify({ code: 'STREAM_LIMIT' }), {
+          status: 429,
+          headers: { 'Retry-After': '60' },
+        })
+    )
+    await start()
+    await advance(59999)
+    expect(h.streamCalls).toHaveLength(1)
+    await advance(1)
+    expect(h.streamCalls).toHaveLength(2)
+  })
+
+  it('other 429s reconnect after Retry-After without polling', async () => {
+    const h = harness()
+    h.onStream(
+      () =>
+        new Response(JSON.stringify({ error: 'Too many requests' }), {
+          status: 429,
+          headers: { 'Retry-After': '20' },
+        })
+    )
+    await start()
+    await advance(19999)
+    expect(h.streamCalls).toHaveLength(1)
+    await advance(1)
+    expect(h.streamCalls).toHaveLength(2)
+    expect(h.flagCalls).toHaveLength(1)
+  })
+
+  it('an oversized event closes the stream and falls back to polling', async () => {
+    const h = harness()
+    await start()
+    const stream = h.lastStream()
+    stream.send('data: ' + 'x'.repeat(1024 * 1024 + 10))
+    await flush()
+    expect(stream.signal?.aborted).toBe(true)
+    // catch-up fetch, then polling
+    expect(h.flagCalls).toHaveLength(2)
+    await advance(30000)
+    expect(h.flagCalls).toHaveLength(3)
+    await advance(5 * 60000 - 30000)
+    expect(h.streamCalls).toHaveLength(2)
+  })
+
+  it('an empty id field resets the Last-Event-ID for the next connection', async () => {
+    const h = harness()
+    await start()
+    h.lastStream().send('event: ready\nid: 7\ndata: {"version":7}\n\n')
+    h.lastStream().send('event: ping\nid\ndata: {}\n\n')
+    await flush()
+    h.lastStream().close()
+    await advance(1000)
+    expect(h.streamCalls).toHaveLength(2)
+    // falls back to the ETag version
+    expect(h.streamCalls[1].headers['Last-Event-ID']).toBe('1')
+  })
+
+  it('a failing stream start does not fail the refresh', async () => {
+    const h = harness()
+    ;(global as any).document = {
+      visibilityState: 'visible',
+      addEventListener: () => {
+        throw new Error('boom')
+      },
+      removeEventListener: () => {},
+    }
+    const onError = jest.fn()
+    client = new TogglelyClient({ ...baseConfig, autoFetch: false })
+    client.on('error', onError)
+    await expect(client.refresh()).resolves.toBeUndefined()
+    expect(client.isReady()).toBe(true)
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(h.flagCalls).toHaveLength(1)
+  })
+
+  it('destroy() settles pending reads with null / defaults', async () => {
+    const h = harness()
+    // pending until aborted, like a real fetch
+    h.onFlags(
+      (init) =>
+        new Promise<Response>((_, reject) =>
+          init.signal?.addEventListener('abort', () =>
+            reject(new Error('aborted'))
+          )
+        )
+    )
+    client = new TogglelyClient({ ...baseConfig, autoFetch: false })
+    const waiting = client.getValue('a')
+    const enabled = client.isEnabled('a', true)
+    client.destroy()
+    await expect(waiting).resolves.toBeNull()
+    await expect(enabled).resolves.toBe(true)
+
+    // reads that already started their request
+    const other = new TogglelyClient({ ...baseConfig, autoFetch: false })
+    const inFlight = other.getValue('a')
+    await advance(20)
+    expect(h.flagCalls).toHaveLength(1)
+    other.destroy()
+    await expect(inFlight).resolves.toBeNull()
+  })
+
+  it('ignores offline JSON that arrives after server data', async () => {
+    fakeBrowser()
+    let releaseOffline!: () => void
+    ;(global.fetch as jest.Mock).mockImplementation(async (url: string) => {
+      if (url === '/toggles.json') {
+        await new Promise<void>((resolve) => {
+          releaseOffline = resolve
+        })
+        return new Response(JSON.stringify({ a: false }))
+      }
+      return flagsResponse({ a: flag(true) }, 'W/"1-abc"')
+    })
+    client = new TogglelyClient({
+      ...baseConfig,
+      refreshStrategy: 'manual',
+      offlineFallback: true,
+      offlineJsonPath: '/toggles.json',
+    })
+    await flush()
+    expect(client.getAllToggles().a.value).toBe(true)
+    releaseOffline()
+    await flush()
+    expect(client.getAllToggles().a.value).toBe(true)
   })
 
   it('polling respects minRefreshIntervalMs', async () => {

@@ -45,4 +45,4 @@ Write-Host ""
 
 # Run the integration tests
 Write-Host "Running integration tests..."
-& npx jest --config jest.integration.config.js @args
+& npx jest --config jest.integration.config.cjs @args

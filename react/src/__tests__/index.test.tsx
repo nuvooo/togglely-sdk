@@ -235,6 +235,43 @@ describe('TogglelyProvider lifecycle (realtime)', () => {
     expect(lastClient().refresh).toHaveBeenCalledTimes(1)
   })
 
+  it('does not refetch when the parent re-renders with inline initialToggles', () => {
+    const { rerender } = render(
+      <TogglelyProvider {...props} initialToggles={{ a: true }}>
+        <div />
+      </TogglelyProvider>
+    )
+    rerender(
+      <TogglelyProvider {...props} initialToggles={{ a: true }}>
+        <div />
+      </TogglelyProvider>
+    )
+    rerender(
+      <TogglelyProvider {...props} initialToggles={{ a: false }}>
+        <div />
+      </TogglelyProvider>
+    )
+    expect(TogglelyClient).toHaveBeenCalledTimes(1)
+    expect(lastClient().refresh).toHaveBeenCalledTimes(1)
+    jest.runAllTimers()
+    expect(lastClient().destroy).not.toHaveBeenCalled()
+  })
+
+  it('fetches once under StrictMode', () => {
+    render(
+      <React.StrictMode>
+        <TogglelyProvider {...props}>
+          <div />
+        </TogglelyProvider>
+      </React.StrictMode>
+    )
+    const refreshes = (TogglelyClient as jest.Mock).mock.results.reduce(
+      (sum: number, result: any) => sum + result.value.refresh.mock.calls.length,
+      0
+    )
+    expect(refreshes).toBe(1)
+  })
+
   it('does not fetch on mount with autoFetch: false', () => {
     render(
       <TogglelyProvider {...props} autoFetch={false}>

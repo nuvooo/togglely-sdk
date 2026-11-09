@@ -49,7 +49,7 @@ describe('Vanilla SDK', () => {
 
   afterEach(() => {
     // Clean up global instance
-    delete (window as any).togglely
+    destroyTogglely()
     jest.clearAllMocks()
   })
 

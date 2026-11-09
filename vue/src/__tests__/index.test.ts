@@ -76,6 +76,17 @@ describe('Vue SDK', () => {
       expect(client.destroy).toHaveBeenCalledTimes(1)
     })
 
+    it('destroys the client on unmount without app.onUnmount (Vue < 3.5)', () => {
+      const plugin = createTogglely(testConfig)
+      const app = createApp(defineComponent({ render: () => h('div') }))
+      ;(app as any).onUnmount = undefined
+      app.use(plugin)
+      const client = app.config.globalProperties.$togglely
+      app.mount(document.createElement('div'))
+      app.unmount()
+      expect(client.destroy).toHaveBeenCalledTimes(1)
+    })
+
     it('keeps the default refresh strategy in the browser', () => {
       const { TogglelyClient } = jest.requireMock('@togglely/sdk-core')
       createTogglely(testConfig).install(

@@ -74,13 +74,27 @@ app.use(createTogglely({
   offlineJsonPath: '/toggles.json',
   offlineToggles: { 'feature-x': { value: true, enabled: true } },
   initialToggles: serverFetchedToggles,
-  refreshStrategy: 'manual',
+  refreshStrategy: 'realtime',  // default; 'manual' to opt out
   refreshIntervalMs: 30000,
   timeout: 5000,
 }));
 ```
 
 The client is also available as `this.$togglely` in the Options API.
+
+## Real-time Updates & Caching
+
+Since 1.3.0 the client uses `refreshStrategy: 'realtime'` by default: it keeps a live change stream (Server-Sent Events) open and only refetches when flags changed, using conditional requests (`ETag` → `304 Not Modified`). If streaming is unavailable (stream limit, older Togglely server, proxies) it falls back to ETag polling every `refreshIntervalMs` (default 30 s). Changed values reach your UI automatically through the `update` event.
+
+- **Lifecycle:** `app.unmount()` closes the stream (`client.destroy()`, Vue ≥ 3.5; on older versions call `app.config.globalProperties.$togglely.destroy()` yourself).
+- **SSR (Nuxt):** on the server the plugin defaults to `refreshStrategy: 'manual'`, so no stream is opened during rendering.
+- **Opt out:** pass `refreshStrategy: 'manual'` to restore the pre-1.3.0 behaviour (fetch only on `refresh()`).
+- **Hidden tabs:** the stream is closed after 5 minutes in a hidden tab and resumed when visible (`pauseWhenHidden: false` disables this).
+- **Debugging:** `client.on('stream-connected' | 'stream-disconnected', ...)`.
+
+**Server-side reactions:** to run backend logic when a flag changes (cache invalidation, deployments, audit trails), configure a **webhook** for the project in the Togglely dashboard (*Project settings → Webhooks*) instead of keeping a stream open in every server process.
+
+See [Core SDK — Real-time Updates & Caching](../core/README.md#real-time-updates--caching) for the details.
 
 ## Composables API Reference
 

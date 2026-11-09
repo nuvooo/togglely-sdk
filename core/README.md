@@ -54,9 +54,14 @@ const client = new TogglelyClient({
   context: ToggleContext, // Initial targeting context (userId, email, country, ...)
 
   // --- Refresh ---
-  refreshStrategy: 'manual' | 'interval' | 'stale-while-revalidate', // default: 'manual'
-  refreshIntervalMs: number,       // Interval period in ms (default: 30000)
-  minRefreshIntervalMs: number,    // SWR cooldown in ms (default: 5000)
+  refreshStrategy: 'realtime' | 'manual' | 'interval' | 'stale-while-revalidate', // default: 'realtime'
+  refreshIntervalMs: number,       // Interval / polling fallback period in ms (default: 30000)
+  minRefreshIntervalMs: number,    // SWR cooldown, minimum polling period in ms (default: 5000)
+
+  // --- Realtime ---
+  streamPath: string,              // Change stream endpoint (default: '/sdk/stream')
+  pauseWhenHidden: boolean,        // Browser: close the stream after 5 min in a hidden tab (default: true)
+  onChange: (state) => void,       // Shortcut for client.on('update', handler)
 });
 ```
 
@@ -200,6 +205,8 @@ Unsubscribe a previously registered handler.
 | `error` | Any refresh fails (network error, HTTP error, timeout) |
 | `offline` | The client transitions to offline mode (fallback toggles active) |
 | `online` | The client transitions back from offline to online |
+| `stream-connected` | The realtime change stream was (re)opened |
+| `stream-disconnected` | The realtime change stream was closed (reconnect, fallback, pause) |
 
 ```typescript
 const unsubscribe = client.on('ready', (state) => {
@@ -239,7 +246,7 @@ Returns a copy of the full state object (`isReady`, `isOffline`, `lastError`, `l
 
 #### `destroy(): void`
 
-Clear all cached toggles, remove all event handlers, and stop any interval/timeout timers. Call this when you unmount or shut down.
+Close the realtime stream, abort pending requests, clear all cached toggles, remove all event handlers and stop all timers. Call this when you unmount or shut down. A destroyed client cannot be restarted; create a new one instead.
 
 ```typescript
 client.destroy();
@@ -378,11 +385,52 @@ const envVars = togglesToEnvVars({ 'feature-a': true }, 'TOGGLELY_');
 // -> { TOGGLELY_FEATURE_A: 'true' }
 ```
 
+## Real-time Updates & Caching
+
+Since 1.3.0 the default `refreshStrategy` is `'realtime'`: the client keeps the flags in memory and **only fetches again when something changed**.
+
+1. **Initial fetch** `GET /sdk/flags/:project/:environment` as before. Responses carry an `ETag`; every later fetch sends `If-None-Match`, so an unchanged state costs a `304 Not Modified` (no body, no `update` event).
+2. **Change stream:** afterwards the client opens `GET /sdk/stream/:project/:environment` (Server-Sent Events over `fetch`, API key in the `Authorization` header). On a `flags-changed` event it performs one conditional fetch and emits `update` if values changed. Changes that happened while disconnected are caught up via `Last-Event-ID`.
+3. **Resilience:** heartbeats are watched (no data for 60 s → reconnect); reconnects use exponential backoff with jitter (1 s … 30 s, at least the server's `retry`).
+4. **Fallback to ETag polling** every `refreshIntervalMs` (default 30 s, at least `minRefreshIntervalMs`):
+   - `429` (stream limit reached) or repeated stream failures → polling, stream retried after 5 minutes,
+   - `404`/`405` (Togglely server without stream support) or a `fetch` without streaming support → polling until the client is recreated,
+   - `401`/`403` → one `error` event, no reconnect loop.
+5. **Context changes** (`setContext`, `clearContext`) trigger an immediate fetch (flag values and ETag depend on the context); the stream stays open.
+6. **Browser tabs:** with `pauseWhenHidden` (default `true`) the stream is closed after the page has been hidden for 5 minutes and reopened together with a conditional fetch when it becomes visible again.
+7. **Offline fallback** works as before; the last known state stays usable while the connection is down.
+
+```typescript
+const client = new TogglelyClient({
+  apiKey: 'your-api-key',
+  project: 'my-project',
+  environment: 'production',
+  baseUrl: 'https://togglely.example.com',
+  onChange: () => render(client.getAllToggles()), // = client.on('update', ...)
+});
+
+client.on('stream-connected', () => console.log('live'));
+client.on('stream-disconnected', () => console.log('reconnecting / polling'));
+
+// On shutdown / unmount: closes the stream and all timers
+client.destroy();
+```
+
+**Opting out:** `refreshStrategy: 'manual'` restores the behaviour before 1.3.0 (no stream, no background requests; `refresh()` still uses conditional requests).
+
+**Node.js:** works with the global `fetch` of Node ≥ 18. Timers are `unref()`'d, but an open stream keeps the process alive — call `client.destroy()` when shutting down. For one-off scripts and CLIs use `refreshStrategy: 'manual'`.
+
+**Server-side reactions:** to run backend logic when a flag changes (cache invalidation, deployments, audit trails), configure a **webhook** for the project in the Togglely dashboard (*Project settings → Webhooks*) instead of keeping a stream open in every server process.
+
 ## Refresh Strategies
 
-### `manual` (default)
+### `realtime` (default)
 
-Cached reads never trigger network requests. Call `refresh()` explicitly when you want fresh data.
+Live change stream with ETag polling as fallback, see [Real-time Updates & Caching](#real-time-updates--caching).
+
+### `manual`
+
+Cached reads never trigger network requests. Call `refresh()` explicitly when you want fresh data (behaviour before 1.3.0).
 
 ```typescript
 const client = new TogglelyClient({
@@ -422,6 +470,7 @@ const client = new TogglelyClient({
 
 | Strategy | Network on read? | Automatic background refresh? | Best for |
 |----------|-----------------|------------------------------|----------|
+| `realtime` (default) | No | Yes (only on changes: stream + ETag) | Most apps, long-running servers |
 | `manual` | No | No | Frontend apps, controlled refresh |
 | `interval` | No | Yes (fixed timer) | Dashboards, internal tools |
 | `stale-while-revalidate` | No (returns cache) | Yes (throttled) | Interactive apps with tolerance for staleness |

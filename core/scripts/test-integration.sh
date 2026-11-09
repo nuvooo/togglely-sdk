@@ -36,4 +36,4 @@ echo ""
 
 # Run the integration tests
 echo "🧪 Running integration tests..."
-npx jest --config jest.integration.config.js "$@"
+npx jest --config jest.integration.config.cjs "$@"

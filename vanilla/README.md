@@ -101,6 +101,24 @@ const client = initTogglely({
 
 Returns the global instance set by `initTogglely`, or `null` if not initialized.
 
+### `destroyTogglely(): void`
+
+Destroy the global instance: closes the realtime stream, stops all timers and removes `window.togglely`. `initTogglely()` destroys a previous global instance automatically.
+
+## Real-time Updates & Caching
+
+Since 1.3.0 the client uses `refreshStrategy: 'realtime'` by default **in browsers** (Node.js, SSR and React Native keep `'manual'`): it keeps a live change stream (Server-Sent Events) open and only refetches when flags changed, using conditional requests (`ETag` → `304 Not Modified`). If streaming is unavailable (stream limit, older Togglely server, proxies) it falls back to ETag polling every `refreshIntervalMs` (default 30 s). Changed values reach your UI automatically through the `update` event.
+
+- **Lifecycle:** `togglelyInit()` re-applies your DOM bindings on every `update`. Call `destroyTogglely()` (or `client.destroy()`) when the client is no longer needed.
+- **Node.js:** the default stays `'manual'` (scripts exit as before). An explicit `refreshStrategy: 'realtime'` is meant for long-running servers: the open stream keeps the process alive until `destroyTogglely()` / `client.destroy()`. Without `window` the instance of `initTogglely()` is kept at module level (`getGlobalTogglely()`, `destroyTogglely()` work in Node too).
+- **Opt out:** pass `refreshStrategy: 'manual'` to restore the pre-1.3.0 behaviour (fetch only on `refresh()`).
+- **Hidden tabs:** the stream is closed after 5 minutes in a hidden tab and resumed when visible (`pauseWhenHidden: false` disables this).
+- **Debugging:** `client.on('stream-connected' | 'stream-disconnected', ...)`.
+
+**Server-side reactions:** to run backend logic when a flag changes (cache invalidation, deployments, audit trails), configure a **webhook** for the project in the Togglely dashboard (*Project settings → Webhooks*) instead of keeping a stream open in every server process.
+
+See [Core SDK — Real-time Updates & Caching](../core/README.md#real-time-updates--caching) for the details.
+
 ## Global Helper Functions
 
 These functions use the global instance created by `initTogglely()`. They return a `Promise` and log an error if no global instance exists.

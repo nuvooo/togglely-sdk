@@ -68,6 +68,14 @@ describe('Svelte SDK', () => {
       expect(client).toBeDefined()
     })
 
+    it('passes the refresh strategy through to the core client', () => {
+      const { TogglelyClient } = jest.requireMock('@togglely/sdk-core')
+      initTogglely({ ...config, refreshStrategy: 'realtime' } as any)
+      expect(TogglelyClient).toHaveBeenLastCalledWith(
+        expect.objectContaining({ refreshStrategy: 'realtime' })
+      )
+    })
+
     it('destroys old instance when reinitializing', () => {
       initTogglely(config)
       initTogglely(config)

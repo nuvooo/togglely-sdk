@@ -167,3 +167,145 @@ describe('React SDK', () => {
     })
   })
 })
+
+describe('TogglelyProvider lifecycle (realtime)', () => {
+  const props = {
+    apiKey: 'test-key',
+    project: 'test-project',
+    environment: 'development',
+    baseUrl: 'https://test.togglely.io',
+  }
+  const { TogglelyClient } = jest.requireMock('@togglely/sdk-core')
+  const lastClient = () => {
+    const results = (TogglelyClient as jest.Mock).mock.results
+    return results[results.length - 1].value
+  }
+
+  beforeEach(() => {
+    jest.useFakeTimers()
+    ;(TogglelyClient as jest.Mock).mockClear()
+  })
+
+  afterEach(() => {
+    jest.useRealTimers()
+  })
+
+  it('destroys the client (closing the stream) on unmount', () => {
+    const { unmount } = render(
+      <TogglelyProvider {...props}>
+        <div />
+      </TogglelyProvider>
+    )
+    const client = lastClient()
+    expect(client.destroy).not.toHaveBeenCalled()
+    unmount()
+    jest.runAllTimers()
+    expect(client.destroy).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the client alive across StrictMode effect re-runs', () => {
+    const { unmount } = render(
+      <React.StrictMode>
+        <TogglelyProvider {...props}>
+          <div />
+        </TogglelyProvider>
+      </React.StrictMode>
+    )
+    jest.runAllTimers()
+    const instances = (TogglelyClient as jest.Mock).mock.results.map(
+      (result) => result.value
+    )
+    instances.forEach((client: any) =>
+      expect(client.destroy).not.toHaveBeenCalled()
+    )
+    unmount()
+    jest.runAllTimers()
+    expect(lastClient().destroy).toHaveBeenCalledTimes(1)
+  })
+
+  it('starts the network (initial fetch + stream) in the effect, not in render', () => {
+    render(
+      <TogglelyProvider {...props}>
+        <div />
+      </TogglelyProvider>
+    )
+    expect(TogglelyClient).toHaveBeenCalledWith(
+      expect.objectContaining({ autoFetch: false })
+    )
+    expect(lastClient().refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not refetch when the parent re-renders with inline initialToggles', () => {
+    const { rerender } = render(
+      <TogglelyProvider {...props} initialToggles={{ a: true }}>
+        <div />
+      </TogglelyProvider>
+    )
+    rerender(
+      <TogglelyProvider {...props} initialToggles={{ a: true }}>
+        <div />
+      </TogglelyProvider>
+    )
+    rerender(
+      <TogglelyProvider {...props} initialToggles={{ a: false }}>
+        <div />
+      </TogglelyProvider>
+    )
+    expect(TogglelyClient).toHaveBeenCalledTimes(1)
+    expect(lastClient().refresh).toHaveBeenCalledTimes(1)
+    jest.runAllTimers()
+    expect(lastClient().destroy).not.toHaveBeenCalled()
+  })
+
+  it('fetches once under StrictMode', () => {
+    render(
+      <React.StrictMode>
+        <TogglelyProvider {...props}>
+          <div />
+        </TogglelyProvider>
+      </React.StrictMode>
+    )
+    const refreshes = (TogglelyClient as jest.Mock).mock.results.reduce(
+      (sum: number, result: any) => sum + result.value.refresh.mock.calls.length,
+      0
+    )
+    expect(refreshes).toBe(1)
+  })
+
+  it('does not fetch on mount with autoFetch: false', () => {
+    render(
+      <TogglelyProvider {...props} autoFetch={false}>
+        <div />
+      </TogglelyProvider>
+    )
+    expect(lastClient().refresh).not.toHaveBeenCalled()
+  })
+
+  it('passes initialContext with the config to the first request', () => {
+    render(
+      <TogglelyProvider
+        {...props}
+        context={{ country: 'DE' }}
+        initialContext={{ userId: 'u1' }}
+      >
+        <div />
+      </TogglelyProvider>
+    )
+    expect(TogglelyClient).toHaveBeenCalledWith(
+      expect.objectContaining({ context: { country: 'DE', userId: 'u1' } })
+    )
+  })
+
+  it('getTogglelyState fetches once without stream and destroys the client', async () => {
+    const { getTogglelyState } = jest.requireActual('../index')
+    jest.useRealTimers()
+    const state = await getTogglelyState(props, { userId: 'u1' })
+    expect(state).toEqual({})
+    expect(TogglelyClient).toHaveBeenCalledWith(
+      expect.objectContaining({ refreshStrategy: 'manual', autoFetch: false })
+    )
+    const client = lastClient()
+    expect(client.refresh).toHaveBeenCalledTimes(1)
+    expect(client.destroy).toHaveBeenCalledTimes(1)
+  })
+})

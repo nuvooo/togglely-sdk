@@ -61,6 +61,41 @@ describe('Vue SDK', () => {
       }).not.toThrow()
     })
 
+    it('destroys the client when the app is unmounted', () => {
+      const plugin = createTogglely(testConfig)
+      const app = createApp(defineComponent({
+        render() {
+          return h('div', 'test')
+        },
+      }))
+      app.use(plugin)
+      const client = app.config.globalProperties.$togglely
+      app.mount(document.createElement('div'))
+      expect(client.destroy).not.toHaveBeenCalled()
+      app.unmount()
+      expect(client.destroy).toHaveBeenCalledTimes(1)
+    })
+
+    it('destroys the client on unmount without app.onUnmount (Vue < 3.5)', () => {
+      const plugin = createTogglely(testConfig)
+      const app = createApp(defineComponent({ render: () => h('div') }))
+      ;(app as any).onUnmount = undefined
+      app.use(plugin)
+      const client = app.config.globalProperties.$togglely
+      app.mount(document.createElement('div'))
+      app.unmount()
+      expect(client.destroy).toHaveBeenCalledTimes(1)
+    })
+
+    it('keeps the default refresh strategy in the browser', () => {
+      const { TogglelyClient } = jest.requireMock('@togglely/sdk-core')
+      createTogglely(testConfig).install(
+        createApp(defineComponent({ render: () => h('div') }))
+      )
+      const passed = (TogglelyClient as jest.Mock).mock.lastCall[0]
+      expect(passed.refreshStrategy).toBeUndefined()
+    })
+
     it('sets $togglely on global properties after install', () => {
       const plugin = createTogglely(testConfig)
 

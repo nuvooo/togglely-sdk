@@ -70,10 +70,13 @@ describe('TogglelyClient refresh behavior', () => {
     client.on('update', onUpdate)
 
     await client.refresh()
-    await client.refresh()
-    await client.refresh()
-
     expect(onUpdate).toHaveBeenCalledTimes(1)
+    await client.refresh()
+    // identical payload: no update
+    expect(onUpdate).toHaveBeenCalledTimes(1)
+    await client.refresh()
+    // value of an existing flag changed
+    expect(onUpdate).toHaveBeenCalledTimes(2)
     client.destroy()
   })
 })

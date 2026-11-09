@@ -54,9 +54,14 @@ const client = new TogglelyClient({
   context: ToggleContext, // Initial targeting context (userId, email, country, ...)
 
   // --- Refresh ---
-  refreshStrategy: 'manual' | 'interval' | 'stale-while-revalidate', // default: 'manual'
-  refreshIntervalMs: number,       // Interval period in ms (default: 30000)
-  minRefreshIntervalMs: number,    // SWR cooldown in ms (default: 5000)
+  refreshStrategy: 'realtime' | 'manual' | 'interval' | 'stale-while-revalidate', // default: 'realtime' in browsers, 'manual' elsewhere
+  refreshIntervalMs: number,       // Interval / polling fallback period in ms (default: 30000)
+  minRefreshIntervalMs: number,    // SWR cooldown, minimum polling period in ms (default: 5000)
+
+  // --- Realtime ---
+  streamPath: string,              // Change stream endpoint (default: '/sdk/stream')
+  pauseWhenHidden: boolean,        // Browser: close the stream after 5 min in a hidden tab (default: true)
+  onChange: (state) => void,       // Shortcut for client.on('update', handler)
 });
 ```
 
@@ -200,6 +205,8 @@ Unsubscribe a previously registered handler.
 | `error` | Any refresh fails (network error, HTTP error, timeout) |
 | `offline` | The client transitions to offline mode (fallback toggles active) |
 | `online` | The client transitions back from offline to online |
+| `stream-connected` | The realtime change stream was (re)opened |
+| `stream-disconnected` | The realtime change stream was closed (reconnect, fallback, pause) |
 
 ```typescript
 const unsubscribe = client.on('ready', (state) => {
@@ -239,7 +246,7 @@ Returns a copy of the full state object (`isReady`, `isOffline`, `lastError`, `l
 
 #### `destroy(): void`
 
-Clear all cached toggles, remove all event handlers, and stop any interval/timeout timers. Call this when you unmount or shut down.
+Close the realtime stream, abort pending requests (pending reads resolve with `null` / their default value), clear all cached toggles, remove all event handlers and stop all timers. Call this when you unmount or shut down. A destroyed client cannot be restarted; create a new one instead.
 
 ```typescript
 client.destroy();
@@ -378,11 +385,62 @@ const envVars = togglesToEnvVars({ 'feature-a': true }, 'TOGGLELY_');
 // -> { TOGGLELY_FEATURE_A: 'true' }
 ```
 
+## Real-time Updates & Caching
+
+Since 1.3.0 browsers use `refreshStrategy: 'realtime'` by default: the client keeps the flags in memory and **only fetches again when something changed**.
+
+| Platform | Default `refreshStrategy` |
+|----------|---------------------------|
+| Browsers with streaming `fetch` (`ReadableStream` + `TextDecoder`) | `'realtime'` |
+| Node.js, SSR, React Native, Web Workers (no `document`) | `'manual'` (as in 1.2.x) |
+
+`detectDefaultRefreshStrategy()` returns the default for the current platform. An explicit `refreshStrategy` always wins.
+
+1. **Initial fetch** `GET /sdk/flags/:project/:environment` as before. Responses carry an `ETag`; every later fetch sends `If-None-Match`, so an unchanged state costs a `304 Not Modified` (no body, no `update` event).
+2. **Change stream:** afterwards the client opens `GET /sdk/stream/:project/:environment` (Server-Sent Events over `fetch`, API key in the `Authorization` header). On a `flags-changed` event it performs one conditional fetch and emits `update` if values changed. Changes that happened while disconnected are caught up via `Last-Event-ID`.
+3. **Resilience:** heartbeats are watched (no data for 60 s → reconnect); reconnects use exponential backoff with jitter (1 s … 30 s, at least the server's `retry`).
+4. **Fallback to ETag polling** every `refreshIntervalMs` (default 30 s, at least `minRefreshIntervalMs`):
+   - `429` with `code: 'STREAM_LIMIT'` → polling, stream retried after `Retry-After` (at most 5 minutes); other `429`s reconnect after `Retry-After`,
+   - repeated stream failures or an oversized event (> 1 MB) → polling, stream retried after 5 minutes,
+   - `404`/`405` (Togglely server without stream support) → polling until the client is recreated,
+   - no streaming `fetch` (React Native, `response.body` without `getReader`) → polling right away, no stream attempts,
+   - `401`/`403` → one `error` event, no reconnect or polling loop.
+   - A stream request must deliver its response headers within 15 s.
+5. **Context changes** (`setContext`, `clearContext`) trigger an immediate fetch (flag values and ETag depend on the context); the stream stays open.
+6. **Browser tabs:** with `pauseWhenHidden` (default `true`) the stream is closed after the page has been hidden for 5 minutes and reopened together with a conditional fetch when it becomes visible again.
+7. **Offline fallback** works as before; the last known state stays usable while the connection is down.
+
+```typescript
+const client = new TogglelyClient({
+  apiKey: 'your-api-key',
+  project: 'my-project',
+  environment: 'production',
+  baseUrl: 'https://togglely.example.com',
+  onChange: () => render(client.getAllToggles()), // = client.on('update', ...)
+});
+
+client.on('stream-connected', () => console.log('live'));
+client.on('stream-disconnected', () => console.log('reconnecting / polling'));
+
+// On shutdown / unmount: closes the stream and all timers
+client.destroy();
+```
+
+**Opting out:** `refreshStrategy: 'manual'` restores the behaviour before 1.3.0 (no stream, no background requests; `refresh()` still uses conditional requests).
+
+**Node.js:** the default stays `'manual'`, so scripts and CLIs exit as before. `refreshStrategy: 'realtime'` works with the global `fetch` of Node ≥ 18 and is meant for **long-running servers**: timers are `unref()`'d, but the open stream keeps the process alive until `client.destroy()` is called. For reacting to flag changes on servers, webhooks (below) are usually the better fit.
+
+**Server-side reactions:** to run backend logic when a flag changes (cache invalidation, deployments, audit trails), configure a **webhook** for the project in the Togglely dashboard (*Project settings → Webhooks*) instead of keeping a stream open in every server process.
+
 ## Refresh Strategies
 
-### `manual` (default)
+### `realtime` (default in browsers)
 
-Cached reads never trigger network requests. Call `refresh()` explicitly when you want fresh data.
+Live change stream with ETag polling as fallback, see [Real-time Updates & Caching](#real-time-updates--caching).
+
+### `manual` (default in Node.js, SSR, React Native)
+
+Cached reads never trigger network requests. Call `refresh()` explicitly when you want fresh data (behaviour before 1.3.0).
 
 ```typescript
 const client = new TogglelyClient({
@@ -422,6 +480,7 @@ const client = new TogglelyClient({
 
 | Strategy | Network on read? | Automatic background refresh? | Best for |
 |----------|-----------------|------------------------------|----------|
+| `realtime` (browser default) | No | Yes (only on changes: stream + ETag) | Browser apps, long-running servers |
 | `manual` | No | No | Frontend apps, controlled refresh |
 | `interval` | No | Yes (fixed timer) | Dashboards, internal tools |
 | `stale-while-revalidate` | No (returns cache) | Yes (throttled) | Interactive apps with tolerance for staleness |

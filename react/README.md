@@ -67,9 +67,11 @@ interface TogglelyProviderProps {
   timeout?: number;                        // Request timeout in ms
   offlineJsonPath?: string;                // Path to offline JSON file
   offlineToggles?: Record<string, ToggleValue>; // Inline offline toggles
-  refreshStrategy?: 'manual' | 'interval' | 'stale-while-revalidate';
+  refreshStrategy?: 'realtime' | 'manual' | 'interval' | 'stale-while-revalidate'; // default: 'realtime' in browsers
   refreshIntervalMs?: number;
   minRefreshIntervalMs?: number;
+  pauseWhenHidden?: boolean;               // Close the stream after 5 min in a hidden tab (default: true)
+  onChange?: (state: TogglelyState) => void; // Called on every update event
 }
 ```
 
@@ -262,6 +264,21 @@ const ProtectedFeature = withFeatureToggle(MyFeature, {
 // Usage
 <ProtectedFeature someProp="value" />
 ```
+
+## Real-time Updates & Caching
+
+Since 1.3.0 the client uses `refreshStrategy: 'realtime'` by default **in browsers** (Node.js, SSR and React Native keep `'manual'`): it keeps a live change stream (Server-Sent Events) open and only refetches when flags changed, using conditional requests (`ETag` → `304 Not Modified`). If streaming is unavailable (stream limit, older Togglely server, proxies) it falls back to ETag polling every `refreshIntervalMs` (default 30 s). Changed values reach your UI automatically through the `update` event.
+
+- **Lifecycle:** `<TogglelyProvider>` starts the initial fetch and the stream after mounting and closes them (`client.destroy()`) when it unmounts. React StrictMode's double effects do not open a second stream, and re-renders (e.g. inline `initialToggles`) never refetch.
+- **SSR:** nothing is fetched during server rendering (the network starts in the effect, default strategy on the server is `'manual'`); `getTogglelyState()` makes a single request and never opens a stream.
+- **React Native:** default `'manual'`; with `refreshStrategy: 'realtime'` the client uses ETag polling (React Native's `fetch` cannot stream).
+- **Opt out:** pass `refreshStrategy: 'manual'` to restore the pre-1.3.0 behaviour (fetch only on `refresh()`).
+- **Hidden tabs:** the stream is closed after 5 minutes in a hidden tab and resumed when visible (`pauseWhenHidden: false` disables this).
+- **Debugging:** `client.on('stream-connected' | 'stream-disconnected', ...)`.
+
+**Server-side reactions:** to run backend logic when a flag changes (cache invalidation, deployments, audit trails), configure a **webhook** for the project in the Togglely dashboard (*Project settings → Webhooks*) instead of keeping a stream open in every server process.
+
+See [Core SDK — Real-time Updates & Caching](../core/README.md#real-time-updates--caching) for the details.
 
 ## SSR Integration
 

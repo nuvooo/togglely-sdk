@@ -91,8 +91,22 @@ export function createTogglely(options: TogglelyPluginOptions) {
         ;(window as any).__TOGGLELY_TOGGLES = initialToggles
       }
 
+      // Default strategy: 'realtime' in browsers, 'manual' during SSR
       const client = new TogglelyClient(config)
       app.provide(TOGGLELY_CLIENT_KEY, client)
+
+      // app.unmount() closes the stream and timers
+      const anyApp = app as any
+      if (typeof anyApp.onUnmount === 'function') {
+        // Vue >= 3.5
+        anyApp.onUnmount(() => client.destroy())
+      } else {
+        const unmount = app.unmount
+        app.unmount = function (this: App) {
+          unmount.call(this)
+          client.destroy()
+        }
+      }
 
       // Make client available globally
       app.config.globalProperties.$togglely = client
@@ -425,4 +439,6 @@ export {
   TogglelyConfig,
   TogglelyState,
   togglesToEnvVars,
+  RefreshStrategy,
+  TogglelyEventType,
 } from '@togglely/sdk-core'

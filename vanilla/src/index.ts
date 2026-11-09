@@ -73,6 +73,7 @@ export {
   TogglelyState,
   ToggleValue,
   togglesToEnvVars,
+  RefreshStrategy,
 } from '@togglely/sdk-core'
 
 import { TogglelyClient, type TogglelyConfig } from '@togglely/sdk-core'
@@ -83,8 +84,15 @@ import { TogglelyClient, type TogglelyConfig } from '@togglely/sdk-core'
  * Initialize Togglely with global instance
  * Creates a global `window.togglely` instance for easy access
  */
+// Module-level instance (Node has no window)
+let moduleClient: TogglelyClient | null = null
+
 export function initTogglely(config: TogglelyConfig): TogglelyClient {
+  // Replacing the global instance: close the old stream and timers
+  destroyTogglely()
+
   const client = new TogglelyClient(config)
+  moduleClient = client
 
   // Make available globally in browser
   if (typeof window !== 'undefined') {
@@ -95,13 +103,26 @@ export function initTogglely(config: TogglelyConfig): TogglelyClient {
 }
 
 /**
+ * Destroy the global instance (closes the realtime stream and timers)
+ */
+export function destroyTogglely(): void {
+  const current = getGlobalTogglely()
+  current?.destroy()
+  if (moduleClient && moduleClient !== current) moduleClient.destroy()
+  moduleClient = null
+  if (typeof window !== 'undefined') {
+    delete (window as any).togglely
+  }
+}
+
+/**
  * Get the global Togglely instance
  */
 export function getGlobalTogglely(): TogglelyClient | null {
   if (typeof window !== 'undefined') {
     return (window as any).togglely || null
   }
-  return null
+  return moduleClient
 }
 
 /**

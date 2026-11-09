@@ -82,33 +82,41 @@ export function TogglelyProvider({
   offlineFallback = true,
   ...config
 }: TogglelyProviderProps) {
-  const [client] = useState(() => {
-    const c = new TogglelyClient({
-      ...config,
-      offlineFallback,
-    })
-    if (initialContext) {
-      c.setContext(initialContext)
-    }
-    return c
-  })
+  const [client] = useState(
+    () =>
+      // Default strategy: 'realtime' in browsers, 'manual' during SSR
+      new TogglelyClient({
+        ...config,
+        // Part of the first request: avoids a second fetch for the context
+        context: initialContext
+          ? { ...config.context, ...initialContext }
+          : config.context,
+        offlineFallback,
+        // Network starts in the effect: StrictMode may call this
+        // initializer twice and discard one instance
+        autoFetch: false,
+      })
+  )
+  const destroyTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const startedClient = useRef<TogglelyClient | null>(null)
 
   const [state, setState] = useState<TogglelyState>(client.getState())
 
+  // Inject initial toggles for SSR if provided (no refetch on changes)
   useEffect(() => {
-    // Inject initial toggles for SSR if provided
     if (initialToggles && typeof window !== 'undefined') {
       ;(window as any).__TOGGLELY_TOGGLES = initialToggles
-      // Trigger a re-load if we just set the window variable
-      if (initialToggles) {
-        // The client constructor already calls loadOfflineToggles,
-        // but if we are hydrating, we might want to ensure they are sync
-      }
+    }
+  }, [initialToggles])
+
+  // Lifecycle: once per client (inline props do not refetch)
+  useEffect(() => {
+    // Re-run with the same client (StrictMode): keep it
+    if (destroyTimer.current) {
+      clearTimeout(destroyTimer.current)
+      destroyTimer.current = null
     }
 
-    if (initialContext) {
-      client.setContext(initialContext)
-    }
     const unsubscribeReady = client.on('ready', (newState) =>
       setState(newState)
     )
@@ -125,15 +133,24 @@ export function TogglelyProvider({
       setState(newState)
     )
 
+    // Initial fetch, starts the realtime stream; once per client
+    if (config.autoFetch !== false && startedClient.current !== client) {
+      startedClient.current = client
+      client.refresh()?.catch(() => {})
+    }
+
     return () => {
       unsubscribeReady()
       unsubscribeUpdate()
       unsubscribeError()
       unsubscribeOffline()
       unsubscribeOnline()
-      client.destroy()
+      // Deferred: StrictMode unmounts and re-mounts effects with the same
+      // client; only a real unmount closes stream and timers
+      destroyTimer.current = setTimeout(() => client.destroy(), 0)
     }
-  }, [client, initialToggles])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client])
 
   return (
     <TogglelyContext.Provider value={{ client, state }}>
@@ -154,16 +171,21 @@ export async function getTogglelyState(
     ...config,
     autoFetch: false, // Disable auto-fetch for SSR
     offlineFallback: false,
+    // One-off request: no change stream on the server
+    refreshStrategy: 'manual',
   })
 
   if (context) {
     client.setContext(context)
   }
 
-  // Initial fetch
-  await client.refresh()
-
-  return client.getAllToggles()
+  try {
+    // Initial fetch
+    await client.refresh()
+    return client.getAllToggles()
+  } finally {
+    client.destroy()
+  }
 }
 
 // ==================== Hooks ====================
@@ -548,6 +570,7 @@ export function useTogglelySuspense(): TogglelyClient {
 
 // Re-export core types
 export type {
+  RefreshStrategy,
   ToggleContext,
   TogglelyConfig,
   TogglelyEventType,

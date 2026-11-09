@@ -59,6 +59,7 @@ export function initTogglely(config: TogglelyConfig): TogglelyClient {
     globalClient.destroy()
   }
 
+  // Default strategy: 'realtime' in browsers, 'manual' during SSR
   globalClient = new TogglelyClient(config)
   return globalClient
 }
@@ -353,4 +354,6 @@ export {
   TogglelyConfig,
   TogglelyState,
   togglesToEnvVars,
+  RefreshStrategy,
+  TogglelyEventType,
 } from '@togglely/sdk-core'

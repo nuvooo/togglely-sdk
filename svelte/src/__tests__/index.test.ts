@@ -68,6 +68,18 @@ describe('Svelte SDK', () => {
       expect(client).toBeDefined()
     })
 
+    it('defaults to refreshStrategy manual during SSR (no window)', () => {
+      const { TogglelyClient } = jest.requireMock('@togglely/sdk-core')
+      initTogglely(config)
+      expect(TogglelyClient).toHaveBeenLastCalledWith(
+        expect.objectContaining({ refreshStrategy: 'manual' })
+      )
+      initTogglely({ ...config, refreshStrategy: 'realtime' } as any)
+      expect(TogglelyClient).toHaveBeenLastCalledWith(
+        expect.objectContaining({ refreshStrategy: 'realtime' })
+      )
+    })
+
     it('destroys old instance when reinitializing', () => {
       initTogglely(config)
       initTogglely(config)

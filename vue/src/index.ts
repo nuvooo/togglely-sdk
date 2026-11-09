@@ -91,8 +91,17 @@ export function createTogglely(options: TogglelyPluginOptions) {
         ;(window as any).__TOGGLELY_TOGGLES = initialToggles
       }
 
-      const client = new TogglelyClient(config)
+      const client = new TogglelyClient({
+        // SSR: no realtime stream on the server (nothing would close it)
+        ...(typeof window === 'undefined' && {
+          refreshStrategy: 'manual' as const,
+        }),
+        ...config,
+      })
       app.provide(TOGGLELY_CLIENT_KEY, client)
+
+      // app.unmount() closes the stream and timers (Vue >= 3.5)
+      ;(app as any).onUnmount?.(() => client.destroy())
 
       // Make client available globally
       app.config.globalProperties.$togglely = client
@@ -425,4 +434,6 @@ export {
   TogglelyConfig,
   TogglelyState,
   togglesToEnvVars,
+  RefreshStrategy,
+  TogglelyEventType,
 } from '@togglely/sdk-core'

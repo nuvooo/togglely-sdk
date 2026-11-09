@@ -36,6 +36,7 @@ import {
   getNumber,
   getJSON,
   TogglelyClient,
+  destroyTogglely,
 } from '../index'
 
 describe('Vanilla SDK', () => {
@@ -61,6 +62,26 @@ describe('Vanilla SDK', () => {
     it('sets window.togglely', () => {
       initTogglely(config)
       expect((window as any).togglely).toBeDefined()
+    })
+
+    it('destroys the previous global instance (closes its stream)', () => {
+      initTogglely(config)
+      expect(mockDestroy).not.toHaveBeenCalled()
+      initTogglely(config)
+      expect(mockDestroy).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('destroyTogglely', () => {
+    it('destroys and removes the global instance', () => {
+      initTogglely(config)
+      destroyTogglely()
+      expect(mockDestroy).toHaveBeenCalledTimes(1)
+      expect(getGlobalTogglely()).toBeNull()
+    })
+
+    it('is a no-op without instance', () => {
+      expect(() => destroyTogglely()).not.toThrow()
     })
   })
 

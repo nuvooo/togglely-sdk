@@ -59,7 +59,14 @@ export function initTogglely(config: TogglelyConfig): TogglelyClient {
     globalClient.destroy()
   }
 
-  globalClient = new TogglelyClient(config)
+  globalClient = new TogglelyClient({
+    // SSR: no realtime stream on the server (call destroyTogglely() to
+    // close it in the browser)
+    ...(typeof window === 'undefined' && {
+      refreshStrategy: 'manual' as const,
+    }),
+    ...config,
+  })
   return globalClient
 }
 
@@ -353,4 +360,6 @@ export {
   TogglelyConfig,
   TogglelyState,
   togglesToEnvVars,
+  RefreshStrategy,
+  TogglelyEventType,
 } from '@togglely/sdk-core'

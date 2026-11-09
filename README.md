@@ -1,3 +1,5 @@
+![Togglely](.github/banner.png)
+
 # Togglely SDKs
 
 Official JavaScript/TypeScript SDKs for [Togglely](https://togglely.io) -- a self-hosted, multi-tenant feature toggle management platform.

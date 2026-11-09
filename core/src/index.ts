@@ -805,8 +805,9 @@ export class TogglelyClient {
     const status = response.status
 
     if (status === 401 || status === 403) {
-      // Invalid key / origin: report once, no reconnect loop
+      // Invalid key / origin: report once, no reconnect or polling loop
       this.closeStream()
+      this.stopPolling()
       this.state.lastError = new TogglelyNetworkError(
         `Stream HTTP ${status}`,
         status,

@@ -470,6 +470,19 @@ describe('TogglelyClient realtime', () => {
     }
   )
 
+  it('stops polling when a stream retry is rejected with 401', async () => {
+    const h = harness()
+    h.onStream(() => jsonResponse(429, { code: 'STREAM_LIMIT' }))
+    await start()
+    h.onStream(() => jsonResponse(401, { error: 'Invalid API key' }))
+    await advance(5 * 60000)
+    expect(h.streamCalls).toHaveLength(2)
+    const flags = h.flagCalls.length
+    await advance(60 * 60000)
+    expect(h.flagCalls).toHaveLength(flags)
+    expect(h.streamCalls).toHaveLength(2)
+  })
+
   it('does not open a stream when the initial fetch is unauthorized', async () => {
     const h = harness()
     h.onFlags(() => jsonResponse(401, { error: 'Invalid API key' }))

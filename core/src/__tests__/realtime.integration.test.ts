@@ -13,6 +13,7 @@
  *   TOGGLELY_IT_PASSWORD  demo123!
  *   TOGGLELY_IT_PROJECT   sample-project
  *   TOGGLELY_IT_ENV       development
+ *   TOGGLELY_IT_TOKEN     optional dashboard JWT (skips the login)
  *
  * Run with: npm run test:integration -- realtime
  */
@@ -75,11 +76,15 @@ describe('Realtime updates (integration)', () => {
   const realFetch = global.fetch
 
   beforeAll(async () => {
-    const login = await api<{ token: string }>('/auth/login', null, {
-      method: 'POST',
-      body: { email: EMAIL, password: PASSWORD },
-    })
-    token = login.token
+    // An existing dashboard JWT avoids the login rate limit (5 / 15 min)
+    token =
+      process.env.TOGGLELY_IT_TOKEN ||
+      (
+        await api<{ token: string }>('/auth/login', null, {
+          method: 'POST',
+          body: { email: EMAIL, password: PASSWORD },
+        })
+      ).token
 
     const projects = await api<{ projects: any[] } | any[]>('/projects', token)
     const project = (Array.isArray(projects) ? projects : projects.projects).find(
